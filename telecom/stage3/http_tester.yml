@@ -1,0 +1,99 @@
+- hosts: all
+  vars:
+    container_name: http-tester-container
+  tasks:
+    - name: Установка зависимостей
+      become: true
+      apt:
+        name: [apt-transport-https, ca-certificates, curl, gnupg, lsb-release]
+        state: present
+        update_cache: yes
+
+    - name: Проверка наличия GPG-ключа Docker
+      become: true
+      stat:
+        path: /usr/share/keyrings/docker-archieve-keyring.gpg
+      register: gpg_key_status
+
+    - name: Добавление GPG ключа Docker
+      become: true
+      shell: curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+      when: not gpg_key_status
+
+    - name: Добавление репозитория Docker
+      become: true
+      copy:
+        content: |
+          deb [arch=amd64 signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu jammy stable
+        dest: /etc/apt/sources.list.d/docker.list
+
+    - name: Установка Docker
+      become: true
+      apt:
+        name: [docker-ce, docker-ce-cli, containerd.io]
+        state: latest
+        update_cache: yes
+
+    - name: Добавление пользователя в группу docker
+      become: true
+      user:
+        name: "{{ ansible_user }}"
+        groups: docker
+        append: yes
+
+    - name: Запуск и включение docker.service
+      become: true
+      systemd:
+        name: docker
+        enabled: yes
+        state: started
+
+    - name: Проверка docker --version
+      command: docker --version
+      register: docker_version_output
+
+    - name: Показать версию Docker
+      debug:
+        var: docker_version_output.stdout
+
+    - name: Копирование файлов
+      copy:
+        src: ./app/
+        dest: /home/{{ ansible_user }}/app/
+        mode: '0755'
+
+    - name: Сборка Docker-образа
+      docker_image:
+        name: http-tester
+        source: build
+        build:
+          path: /home/{{ ansible_user }}/app
+
+    - name: Запуск контейнера
+      docker_container:
+        name: "{{ container_name }}"
+        image: http-tester
+        state: started
+        restart_policy: "no"
+        auto_remove: no
+
+    - name: Ожидание завершения контейнера
+      docker_container_info:
+        name: "{{ container_name }}"
+      register: container_info
+      until: container_info.container.State.Status != 'running'
+      retries: 10
+      delay: 2
+
+    - name: Получение логов контейнера
+      command: docker logs {{ container_name }}
+      register: container_logs
+
+    - name: Показ логов контейнера
+      debug:
+        var: container_logs.stdout
+
+    - name: Удаление контейнера
+      docker_container:
+        name: "{{ container_name }}"
+        state: absent
